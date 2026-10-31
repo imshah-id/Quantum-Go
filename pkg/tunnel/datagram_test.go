@@ -10,9 +10,9 @@ import (
 
 // mustEndpoint builds a DatagramEndpoint for tests, failing on the CSPRNG-only
 // construction error so call sites stay terse.
-func mustEndpoint(t *testing.T, conn net.PacketConn) *DatagramEndpoint {
+func mustEndpoint(t *testing.T, conn net.PacketConn, opts ...DatagramEndpointOption) *DatagramEndpoint {
 	t.Helper()
-	ep, err := NewDatagramEndpoint(conn)
+	ep, err := NewDatagramEndpoint(conn, opts...)
 	if err != nil {
 		t.Fatalf("NewDatagramEndpoint: %v", err)
 	}

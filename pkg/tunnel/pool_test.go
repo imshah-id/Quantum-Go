@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sara-star-quant/quantum-go/internal/constants"
 	qerrors "github.com/sara-star-quant/quantum-go/internal/errors"
+	"github.com/sara-star-quant/quantum-go/pkg/crypto"
 	"github.com/sara-star-quant/quantum-go/pkg/tunnel"
 )
 
@@ -1013,3 +1015,81 @@ func (o *testPoolObserver) OnHealthCheck(_ bool) {
 }
 
 func (o *testPoolObserver) OnPoolStats(_ tunnel.PoolStatsSnapshot) {}
+
+// A session observer used only for the successful data path below. Unexpected
+// callbacks fail rather than hiding a protocol error behind a no-op observer.
+type trafficObserver struct {
+	tunnel.Observer
+	encrypted atomic.Int64
+	decrypted atomic.Int64
+}
+
+func (o *trafficObserver) OnSessionEnd() {}
+
+func (o *trafficObserver) OnEncrypt(ctx context.Context, _ int) (context.Context, func(error)) {
+	return ctx, func(err error) {
+		if err == nil {
+			o.encrypted.Add(1)
+		}
+	}
+}
+
+func (o *trafficObserver) OnDecrypt(ctx context.Context, _ int) (context.Context, func(error)) {
+	return ctx, func(err error) {
+		if err == nil {
+			o.decrypted.Add(1)
+		}
+	}
+}
+
+func TestPoolConnPublicAccessorsAndSessionObserver(t *testing.T) {
+	addr, cleanup := startEchoServer(t)
+	defer cleanup()
+	before := time.Now()
+	pool := createTestPool(t, addr)
+	defer func() { _ = pool.Close() }()
+	conn, err := pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	underlying := conn.Tunnel()
+	if underlying == nil || conn.Session() != underlying.Session() {
+		t.Fatal("pool handle did not expose its tunnel and session")
+	}
+	if conn.RemoteAddr() != addr || conn.LocalAddr() != underlying.LocalAddr().String() {
+		t.Fatalf("wrong addresses: local=%s remote=%s", conn.LocalAddr(), conn.RemoteAddr())
+	}
+	created := conn.CreatedAt()
+	if created.Before(before) || created.After(time.Now()) {
+		t.Fatalf("connection creation time %v is outside pool creation and acquisition", created)
+	}
+	session := conn.Session()
+	if session.CipherSuite != constants.CipherSuiteAES256GCM {
+		t.Fatalf("expected negotiated AES-GCM, got %v", session.CipherSuite)
+	}
+	if session.IsFIPSCompliant() != crypto.FIPSMode() {
+		t.Fatal("negotiated AES-GCM session FIPS status does not match build mode")
+	}
+	observer := &trafficObserver{}
+	session.SetObserver(observer)
+	if err := conn.Send([]byte("observed echo")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := conn.Receive()
+	if err != nil || string(data) != "observed echo" {
+		t.Fatalf("echo = %q, %v", data, err)
+	}
+	if observer.encrypted.Load() != 1 || observer.decrypted.Load() != 1 {
+		t.Fatal("SetObserver did not report successful encryption and decryption")
+	}
+	if err := conn.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if conn.Tunnel() != nil || conn.Session() != nil || conn.LocalAddr() != "" || conn.RemoteAddr() != "" {
+		t.Fatal("released handle still exposes the pooled connection")
+	}
+	if conn.CreatedAt() != created {
+		t.Fatal("release changed the creation timestamp")
+	}
+}

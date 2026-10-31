@@ -21,11 +21,12 @@ func dialDgramAuth(t *testing.T, seed uint64, drop, dup, reorder float64, server
 func dialDgramAuthOpts(t *testing.T, seed uint64, drop, dup, reorder float64, serverKP *chkem.KeyPair, clientPin *chkem.PublicKey, requireAuth bool) (client, server *Session, dialErr error) {
 	t.Helper()
 	connA, connB := memPipe(seed, drop, dup, reorder)
-	epA := mustEndpoint(t, connA)
-	epB := mustEndpoint(t, connB)
-	epB.staticIdentity = serverKP
-	epB.requireStaticAuth = requireAuth
-	epA.pinnedServerKey = clientPin
+	epA := mustEndpoint(t, connA, WithPinnedServerKey(clientPin))
+	serverOpts := []DatagramEndpointOption{WithStaticIdentity(serverKP)}
+	if requireAuth {
+		serverOpts = append(serverOpts, WithRequireStaticAuth())
+	}
+	epB := mustEndpoint(t, connB, serverOpts...)
 	for _, ep := range []*DatagramEndpoint{epA, epB} {
 		ep.rtoInitial = 5 * time.Millisecond
 		ep.rtoMax = 50 * time.Millisecond
@@ -49,6 +50,9 @@ func dialDgramAuthOpts(t *testing.T, seed uint64, drop, dup, reorder float64, se
 	case r := <-dialCh:
 		if r.err != nil {
 			return nil, nil, r.err
+		}
+		if got := r.conn.RemoteAddr().String(); got != connB.addr.String() {
+			t.Fatalf("remote address = %q, want %q", got, connB.addr.String())
 		}
 		client = r.conn.Session()
 	case <-time.After(30 * time.Second):
@@ -265,10 +269,8 @@ func TestDgramRequirePSKTable(t *testing.T) {
 	}
 	run := func(seed uint64, clientID string, clientKey []byte) (client *Session, dialErr error) {
 		connA, connB := memPipe(seed, 0, 0, 0)
-		epA := mustEndpoint(t, connA)
-		epB := mustEndpoint(t, connB)
-		epB.pskLookup, epB.requirePSK = table, true
-		epA.psk, epA.pskIdentity = clientKey, []byte(clientID)
+		epA := mustEndpoint(t, connA, WithPSK([]byte(clientID), clientKey))
+		epB := mustEndpoint(t, connB, WithPSKLookup(table), WithRequirePSK())
 		for _, ep := range []*DatagramEndpoint{epA, epB} {
 			ep.rtoInitial = 5 * time.Millisecond
 			ep.rtoMax = 50 * time.Millisecond
